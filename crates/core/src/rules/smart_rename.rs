@@ -3715,6 +3715,47 @@ impl Visit for RoleCollector {
     }
 
     fn visit_call_expr(&mut self, call: &CallExpr) {
+        let then_call = match &call.callee {
+            Callee::Expr(callee) => match callee.as_ref() {
+                Expr::Member(MemberExpr {
+                    obj,
+                    prop: MemberProp::Ident(prop),
+                    ..
+                }) if prop.sym == "then"
+                    && matches!(obj.as_ref(), Expr::Ident(id) if is_unresolved_ident(id, "Promise", self.unresolved_mark)) =>
+                {
+                    Some(())
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        if then_call.is_some() {
+            call.callee.visit_with(self);
+            for (index, arg) in call.args.iter().enumerate() {
+                let Some(callback) = (arg.spread.is_none() && index < 2)
+                    .then(|| {
+                        Self::callback_params(&arg.expr).map(|params| (params, arg.expr.as_ref()))
+                    })
+                    .flatten()
+                else {
+                    arg.visit_with(self);
+                    continue;
+                };
+                let role = if index == 0 { "value" } else { "error" };
+                let roles = callback
+                    .0
+                    .iter()
+                    .take(1)
+                    .filter_map(|pat| {
+                        Self::short_param(pat).map(|binding| RoleParam::new(binding, role))
+                    })
+                    .collect();
+                self.with_scope(roles, |this| callback.1.visit_with(this));
+            }
+            return;
+        }
+
         let reduce = match (&call.callee, call.args.first()) {
             (Callee::Expr(callee), Some(first)) if first.spread.is_none() => {
                 match callee.as_ref() {
